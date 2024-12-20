@@ -39,5 +39,4 @@ ENV/
 
 # Project specific
 responses/
-images/
 .DS_Store 

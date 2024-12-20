@@ -1,11 +1,11 @@
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/shelf-analysis', '.']
+    args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/shelf-analysis/app', '.']
 
-  # Push the container image to Container Registry
+  # Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/shelf-analysis']
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/shelf-analysis/app']
 
   # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -15,7 +15,7 @@ steps:
       - 'deploy'
       - 'shelf-analysis'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/shelf-analysis'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/shelf-analysis/app'
       - '--region'
       - '${_REGION}'
       - '--platform'
@@ -26,4 +26,4 @@ substitutions:
   _REGION: us-central1  # default region
 
 images:
-  - 'gcr.io/$PROJECT_ID/shelf-analysis' 
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/shelf-analysis/app'
