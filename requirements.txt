@@ -1,9 +1,10 @@
 streamlit
 pandas
 plotly
-google-cloud-aiplatform
 pillow
 numpy
 tenacity
 python-dotenv
 matplotlib
+google-genai==1.16.1
+google-cloud-storage==3.1.0

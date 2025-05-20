@@ -49,3 +49,6 @@ ANALYSIS_CONFIGS = {
         "top_k": 10
     }
 }
+
+# GCS Configuration
+GCS_BUCKET_NAME = os.getenv("SHELF_ANALYSIS_GCS_BUCKET") # Name of the GCS bucket for storing uploaded media

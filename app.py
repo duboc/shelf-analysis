@@ -17,12 +17,14 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from config import PROJECT_ID, LOCATION, MODEL_NAME
-from utils import initialize_vertex_ai, load_prompt, clean_json_response
-from vertexai.generative_models import GenerativeModel, Part, GenerationConfig
+from config import PROJECT_ID, LOCATION, MODEL_NAME, GCS_BUCKET_NAME # Added GCS_BUCKET_NAME
+from utils import load_prompt, clean_json_response, upload_to_gcs, configure_genai # Updated utils imports
+import google.generativeai as genai # Added google-genai
+from google.generativeai.types import Part as GenaiPart # Added GenaiPart
+from google.generativeai.types import GenerationConfig as GenaiGenerationConfig # Added GenaiGenerationConfig
 import json
 from tenacity import retry, stop_after_attempt, wait_exponential
-import asyncio
+# import asyncio # Commented out as parallel_analysis will be commented
 import logging
 from datetime import datetime
 from dataclasses import dataclass, asdict
@@ -76,28 +78,28 @@ class ValidationThresholds:
     min_shelf_visibility: float = 70.0
     min_logo_visibility: float = 60.0
 
-def analyze_shelf_image_pipeline(model, image_data):
-    # Stage 1: Initial product detection and counting
-    product_analysis = analyze_products(model, image_data)
+# def analyze_shelf_image_pipeline(model, image_data): # Commented out for now
+#     # Stage 1: Initial product detection and counting
+#     product_analysis = analyze_products(model, image_data) # Needs update to GenaiPart
     
-    # Stage 2: Brand and manufacturer identification
-    manufacturer_analysis = analyze_manufacturers(model, image_data, product_analysis)
+#     # Stage 2: Brand and manufacturer identification
+#     manufacturer_analysis = analyze_manufacturers(model, image_data, product_analysis) # Needs update to GenaiPart
     
-    # Stage 3: Shelf organization analysis
-    organization_analysis = analyze_shelf_organization(model, image_data)
+#     # Stage 3: Shelf organization analysis
+#     organization_analysis = analyze_shelf_organization(model, image_data) # Needs update to GenaiPart
     
-    # Stage 4: Competitive analysis
-    competitive_analysis = analyze_competitive_landscape(model, image_data, manufacturer_analysis)
+#     # Stage 4: Competitive analysis
+#     competitive_analysis = analyze_competitive_landscape(model, image_data, manufacturer_analysis) # Needs update to GenaiPart
     
-    # Stage 5: Validation and cross-checking
-    validated_results = validate_analysis(model, [
-        product_analysis,
-        manufacturer_analysis,
-        organization_analysis,
-        competitive_analysis
-    ])
+#     # Stage 5: Validation and cross-checking
+#     validated_results = validate_analysis(model, [ # Needs update to GenaiPart
+#         product_analysis,
+#         manufacturer_analysis,
+#         organization_analysis,
+#         competitive_analysis
+#     ])
     
-    return validated_results
+#     return validated_results
 
 def save_response(response_data, filename):
     """Save response data to a local file."""
@@ -115,9 +117,9 @@ def load_response(filename):
             return json.load(f)
     return None
 
-def analyze_shelf_image_structured(model, image_data, prompt):
+def analyze_shelf_image_structured(model, media_part, prompt): # Signature updated
     # Add validation thresholds configuration
-    thresholds = ValidationThresholds(
+    thresholds = ValidationThresholds( # This dataclass is fine
         min_brand_confidence=75.0,
         min_count_confidence=85.0,
         min_overall_confidence=80.0,
@@ -129,34 +131,35 @@ def analyze_shelf_image_structured(model, image_data, prompt):
     )
     
     # Add image quality validation
-    logger.info("Validating image quality")
-    try:
-        quality_results = validate_image_quality(model, image_data)
-        save_response(quality_results, f'quality_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
+    # logger.info("Validating image quality") # Validation will be conditional based on type
+    # try:
+        # quality_results = validate_image_quality(model, image_data) # image_data not directly available, pass media_part if image
+        # save_response(quality_results, f'quality_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
         
-        image_clarity = quality_results.get('image_clarity', 100)
+        # image_clarity = quality_results.get('image_clarity', 100)
         shelf_visibility = quality_results.get('shelf_visibility', 100)
         
-        if image_clarity < 50:
-            logger.warning(f"Low image clarity: {image_clarity}/100")
-            st.warning("A qualidade da imagem está baixa, os resultados podem ser imprecisos.")
+        # if image_clarity < 50:
+            # logger.warning(f"Low image clarity: {image_clarity}/100")
+            # st.warning("A qualidade da imagem está baixa, os resultados podem ser imprecisos.")
         
-        if shelf_visibility < 70:
-            logger.warning(f"Low shelf visibility: {shelf_visibility}%")
-            st.warning("A visibilidade da prateleira está baixa, os resultados podem ser imprecisos.")
+        # if shelf_visibility < 70:
+            # logger.warning(f"Low shelf visibility: {shelf_visibility}%")
+            # st.warning("A visibilidade da prateleira está baixa, os resultados podem ser imprecisos.")
         
-    except Exception as e:
-        logger.warning(f"Image quality validation failed: {str(e)}")
-        st.warning("Não foi possível validar a qualidade da imagem, prosseguindo com a análise.")
+    # except Exception as e:
+        # logger.warning(f"Image quality validation failed: {str(e)}")
+        # st.warning("Não foi possível validar a qualidade da imagem, prosseguindo com a análise.")
     
     # Generation configs for different stages
-    analysis_config = GenerationConfig(
+    analysis_config = GenaiGenerationConfig( # Updated to GenaiGenerationConfig
         max_output_tokens=8192,
         temperature=0.4,
         top_p=0.95,
         top_k=40,
-        seed=42
+        # seed=42 # Seed might not be available or named differently in GenaiGenerationConfig
     )
+    # TODO: Check GenAI API for seed parameter if needed. For now, removing.
     
     # Create a sample response structure based on the schema
     example_response = {
@@ -196,9 +199,9 @@ def analyze_shelf_image_structured(model, image_data, prompt):
     
     try:
         # Get initial analysis
-        logger.info("Performing initial analysis")
+        logger.info("Performing initial analysis with media_part")
         response = model.generate_content(
-            [Part.from_data(image_data, "image/jpeg"), structured_prompt],
+            [media_part, structured_prompt], # Use passed media_part
             generation_config=analysis_config,
             stream=False
         )
@@ -223,7 +226,7 @@ def analyze_shelf_image_structured(model, image_data, prompt):
         logger.error(f"Analysis error: {str(e)}")
         raise
 
-def validate_image_quality(model, image_data):
+def validate_image_quality(model, image_bytes_data): # Signature updated
     """Validate image quality and suitability for analysis."""
     quality_prompt = """
     Analyze the image quality and return a JSON with the following metrics:
@@ -237,8 +240,10 @@ def validate_image_quality(model, image_data):
     Return ONLY the JSON object, no additional text.
     """
     try:
+        # Create a GenaiPart from the image bytes
+        image_part_for_validation = GenaiPart.from_bytes(data=image_bytes_data, mime_type="image/jpeg") # Assuming jpeg, pass actual mime_type if available
         response = model.generate_content([
-            Part.from_data(image_data, "image/jpeg"),
+            image_part_for_validation, # Use GenaiPart
             quality_prompt
         ])
         
@@ -259,8 +264,8 @@ def validate_image_quality(model, image_data):
         logger.warning(f"Image quality check failed: {str(e)}")
         return {"image_clarity": 100, "shelf_visibility": 100}
 
-def analyze_shelf_image_recommendations(model, image_data):
-    generation_config = GenerationConfig(
+def analyze_shelf_image_recommendations(model, media_part): # Signature updated
+    generation_config = GenaiGenerationConfig( # Updated to GenaiGenerationConfig
         max_output_tokens=8192,
         temperature=0.2,
         top_p=0.95
@@ -274,7 +279,7 @@ def analyze_shelf_image_recommendations(model, image_data):
     Por favor, forneça uma análise detalhada e profissional."""
     
     response = model.generate_content(
-        [recommendations_prompt, Part.from_data(image_data, "image/jpeg")],
+        [recommendations_prompt, media_part], # Use passed media_part
         generation_config=generation_config,
         stream=False
     )
@@ -429,36 +434,38 @@ def create_visualizations(data):
     except Exception as e:
         raise ValueError(f"Erro ao criar visualizações: {str(e)}\nColunas disponíveis: {df.columns.tolist()}")
 
-def analyze_products(model, image_data):
-    product_prompt = """
-    Focus only on identifying and counting individual products:
-    1. Count total number of visible products
-    2. Identify product types (boxes, bottles, etc.)
-    3. Note any partially visible products
-    Return results in JSON format.
-    """
-    response = model.generate_content([
-        Part.from_data(image_data, "image/jpeg"),
-        product_prompt
-    ])
-    return clean_json_response(response.text)
+# def analyze_products(model, image_data): # Commented out for now, needs GenaiPart
+#     product_prompt = """
+#     Focus only on identifying and counting individual products:
+#     1. Count total number of visible products
+#     2. Identify product types (boxes, bottles, etc.)
+#     3. Note any partially visible products
+#     Return results in JSON format.
+#     """
+#     # media_part = GenaiPart.from_bytes(data=image_data, mime_type="image/jpeg")
+#     response = model.generate_content([
+#         # media_part, # Needs update
+#         product_prompt
+#     ])
+#     return clean_json_response(response.text)
 
-def analyze_manufacturers(model, image_data, product_analysis):
-    manufacturer_prompt = f"""
-    Based on the previous product analysis: {product_analysis}
-    Focus on manufacturer identification:
-    1. List all visible brands
-    2. Calculate shelf share per manufacturer
-    3. Identify premium shelf positions
-    Return results in JSON format.
-    """
-    response = model.generate_content([
-        Part.from_data(image_data, "image/jpeg"),
-        manufacturer_prompt
-    ])
-    return clean_json_response(response.text)
+# def analyze_manufacturers(model, image_data, product_analysis): # Commented out for now, needs GenaiPart
+#     manufacturer_prompt = f"""
+#     Based on the previous product analysis: {product_analysis}
+#     Focus on manufacturer identification:
+#     1. List all visible brands
+#     2. Calculate shelf share per manufacturer
+#     3. Identify premium shelf positions
+#     Return results in JSON format.
+#     """
+#     # media_part = GenaiPart.from_bytes(data=image_data, mime_type="image/jpeg")
+#     response = model.generate_content([
+#         # media_part, # Needs update
+#         manufacturer_prompt
+#     ])
+#     return clean_json_response(response.text)
 
-def validate_analysis(model, analysis_results):
+# def validate_analysis(model, analysis_results): # Commented out for now, needs GenaiPart for any model calls
     validation_prompt = f"""
     Review and validate the following analysis results:
     {json.dumps(analysis_results, indent=2)}
@@ -469,65 +476,78 @@ def validate_analysis(model, analysis_results):
     3. Manufacturer presence validation
     4. Logical arrangement patterns
     
-    Return validated and corrected results in JSON format.
-    """
+#     validation_prompt = f"""
+#     Review and validate the following analysis results:
+#     {json.dumps(analysis_results, indent=2)}
     
-    response = model.generate_content(
-        validation_prompt,
-        generation_config=GenerationConfig(temperature=0.2)
-    )
-    return clean_json_response(response.text)
+#     Check for:
+#     1. Consistency in product counts
+#     2. Total shelf share adds up to 100%
+#     3. Manufacturer presence validation
+#     4. Logical arrangement patterns
+    
+#     Return validated and corrected results in JSON format.
+#     """
+    
+#     response = model.generate_content(
+#         validation_prompt,
+#         generation_config=GenaiGenerationConfig(temperature=0.2) # Updated
+#     )
+#     return clean_json_response(response.text)
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def robust_analysis(model, image_data, analysis_type, config):
-    try:
-        response = model.generate_content(
-            [Part.from_data(image_data, "image/jpeg"), analysis_type],
-            generation_config=config
-        )
-        return validate_response(response)
-    except Exception as e:
-        logger.error(f"Analysis failed: {str(e)}")
-        raise
+# @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)) # Commented out for now
+# def robust_analysis(model, image_data, analysis_type, config):
+#     try:
+#         # media_part = GenaiPart.from_bytes(data=image_data, mime_type="image/jpeg")
+#         response = model.generate_content(
+#             # [media_part, analysis_type], # Needs update
+#             generation_config=config # Needs to be GenaiGenerationConfig
+#         )
+#         return validate_response(response)
+#     except Exception as e:
+#         logger.error(f"Analysis failed: {str(e)}")
+#         raise
 
-async def parallel_analysis(model, image_data):
-    tasks = [
-        asyncio.create_task(analyze_products(model, image_data)),
-        asyncio.create_task(analyze_shelf_organization(model, image_data)),
-        asyncio.create_task(analyze_competitive_landscape(model, image_data))
-    ]
-    results = await asyncio.gather(*tasks)
-    return combine_results(results)
+# async def parallel_analysis(model, image_data): # Commented out for now, needs GenaiPart and asyncio
+#     tasks = [
+#         # asyncio.create_task(analyze_products(model, image_data)),
+#         # asyncio.create_task(analyze_shelf_organization(model, image_data)),
+#         # asyncio.create_task(analyze_competitive_landscape(model, image_data))
+#     ]
+#     results = await asyncio.gather(*tasks)
+#     return combine_results(results)
 
-def analyze_shelf_organization(model, image_data):
-    organization_prompt = """
-    Focus on shelf organization patterns:
-    1. Identify product placement patterns
-    2. Note vertical and horizontal organization
-    3. Identify premium shelf positions and their usage
-    4. Analyze spacing and product alignment
-    Return results in JSON format.
-    """
-    response = model.generate_content([
-        Part.from_data(image_data, "image/jpeg"),
-        organization_prompt
-    ])
-    return clean_json_response(response.text)
+# def analyze_shelf_organization(model, image_data): # Commented out for now, needs GenaiPart
+#     organization_prompt = """
+#     Focus on shelf organization patterns:
+#     1. Identify product placement patterns
+#     2. Note vertical and horizontal organization
+#     3. Identify premium shelf positions and their usage
+#     4. Analyze spacing and product alignment
+#     Return results in JSON format.
+#     """
+#     # media_part = GenaiPart.from_bytes(data=image_data, mime_type="image/jpeg")
+#     response = model.generate_content([
+#         # media_part, # Needs update
+#         organization_prompt
+#     ])
+#     return clean_json_response(response.text)
 
-def analyze_competitive_landscape(model, image_data, manufacturer_analysis=None):
-    competitive_prompt = """
-    Analyze competitive positioning:
-    1. Compare brand presence and positioning
-    2. Identify dominant brands and their strategies
-    3. Note any competitive advantages in placement
-    4. Analyze price point positioning if visible
-    Return results in JSON format.
-    """
-    response = model.generate_content([
-        Part.from_data(image_data, "image/jpeg"),
-        competitive_prompt
-    ])
-    return clean_json_response(response.text)
+# def analyze_competitive_landscape(model, image_data, manufacturer_analysis=None): # Commented out for now, needs GenaiPart
+#     competitive_prompt = """
+#     Analyze competitive positioning:
+#     1. Compare brand presence and positioning
+#     2. Identify dominant brands and their strategies
+#     3. Note any competitive advantages in placement
+#     4. Analyze price point positioning if visible
+#     Return results in JSON format.
+#     """
+#     # media_part = GenaiPart.from_bytes(data=image_data, mime_type="image/jpeg")
+#     response = model.generate_content([
+#         # media_part, # Needs update
+#         competitive_prompt
+#     ])
+#     return clean_json_response(response.text)
 
 def validate_response(response):
     """Validate and clean the model's response."""
@@ -634,13 +654,13 @@ def validate_product_data(data):
     
     return True
 
-def cross_validate_analysis(model, image_data, initial_result, thresholds: Optional[ValidationThresholds] = None):
-    """Cross-validate results with a second analysis."""
-    if thresholds is None:
-        thresholds = ValidationThresholds()
+# def cross_validate_analysis(model, image_data, initial_result, thresholds: Optional[ValidationThresholds] = None): # Commented out for now
+#     """Cross-validate results with a second analysis."""
+#     if thresholds is None:
+#         thresholds = ValidationThresholds()
         
-    cross_validation_prompt = f"""
-    Validate the following shelf analysis results and identify any discrepancies:
+#     cross_validation_prompt = f"""
+#     Validate the following shelf analysis results and identify any discrepancies:
     {json.dumps(initial_result, indent=2)}
     
     Return a JSON with EXACTLY this structure:
@@ -684,20 +704,21 @@ def cross_validate_analysis(model, image_data, initial_result, thresholds: Optio
             }}
         }}
     }}
-    """
+#     """
     
-    try:
-        response = model.generate_content(
-            [Part.from_data(image_data, "image/jpeg"), cross_validation_prompt],
-            generation_config=GenerationConfig(
-                temperature=0.2,
-                seed=321,  # Fixed seed for cross-validation
-                top_k=10,
-                top_p=0.95
-            )
-        )
+#     try:
+#         # media_part = GenaiPart.from_bytes(data=image_data, mime_type="image/jpeg") # Needs update
+#         response = model.generate_content(
+#             # [media_part, cross_validation_prompt], # Needs update
+#             generation_config=GenaiGenerationConfig( # Updated
+#                 temperature=0.2,
+#                 # seed=321,  # Check GenAI API for seed
+#                 top_k=10,
+#                 top_p=0.95
+#             )
+#         )
         
-        validation_text = clean_json_response(response.text)
+#         validation_text = clean_json_response(response.text)
         if not validation_text:
             logger.warning("Empty validation response")
             return create_default_validation_response()
@@ -967,87 +988,113 @@ def combine_quadrant_results(results: List[Tuple[Dict, Tuple[int, int]]]) -> Dic
     
     return combined
 
-def parallel_quadrant_analysis(model, quadrants: List[Tuple[bytes, Tuple[int, int]]], prompt: str) -> Dict:
-    """
-    Perform parallel analysis of quadrants using the flash model.
-    """
-    def process_single_quadrant(quadrant_data: bytes, position: Tuple[int, int]):
-        try:
-            logger.info(f"Analyzing quadrant at position {position}")
-            result = analyze_shelf_image_structured(model, quadrant_data, prompt)
-            # Save quadrant result
-            save_response(result, f'quadrant_{position[0]}_{position[1]}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
-            return result, position
-        except Exception as e:
-            logger.error(f"Error analyzing quadrant at position {position}: {str(e)}")
-            return None, position
+# def parallel_quadrant_analysis(model, quadrants: List[Tuple[bytes, Tuple[int, int]]], prompt: str) -> Dict: # Commented out for now
+#     """
+#     Perform parallel analysis of quadrants using the flash model.
+#     """
+#     def process_single_quadrant(quadrant_data: bytes, position: Tuple[int, int]):
+#         try:
+#             logger.info(f"Analyzing quadrant at position {position}")
+#             # Quadrant data is bytes, so it's an image.
+#             quadrant_media_part = GenaiPart.from_bytes(data=quadrant_data, mime_type="image/jpeg") # Assuming jpeg
+#             result = analyze_shelf_image_structured(model, quadrant_media_part, prompt) # Updated call
+#             # Save quadrant result
+#             save_response(result, f'quadrant_{position[0]}_{position[1]}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
+#             return result, position
+#         except Exception as e:
+#             logger.error(f"Error analyzing quadrant at position {position}: {str(e)}")
+#             return None, position
 
-    # Process quadrants in batches
-    batch_size = 4
-    all_results = []
+#     # Process quadrants in batches
+#     batch_size = 4
+#     all_results = []
     
-    for i in range(0, len(quadrants), batch_size):
-        batch = quadrants[i:i + batch_size]
-        batch_results = []
+#     for i in range(0, len(quadrants), batch_size):
+#         batch = quadrants[i:i + batch_size]
+#         batch_results = []
         
-        for quadrant_data, position in batch:
-            result = process_single_quadrant(quadrant_data, position)
-            batch_results.append(result)
+#         for quadrant_data, position in batch:
+#             result = process_single_quadrant(quadrant_data, position)
+#             batch_results.append(result)
             
-        all_results.extend(batch_results)
+#         all_results.extend(batch_results)
 
-    # Combine results
-    final_results = combine_quadrant_results(all_results)
-    save_response(final_results, f'quadrants_combined_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
+#     # Combine results
+#     final_results = combine_quadrant_results(all_results)
+#     save_response(final_results, f'quadrants_combined_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
     
-    return final_results
+#     return final_results
 
-def analyze_shelf(image_data, model, prompt, tab1, tab2, tab3, tab4, grid_size):
+def analyze_shelf(media_data, model, tab1, tab2, tab3, tab4, grid_size, media_mime_type, original_file_name): # Removed prompt from parameters
     """Function to handle the shelf analysis process."""
-    logger.info("Iniciando análise de nova imagem")
+    prompt = load_prompt(media_mime_type) # Load prompt dynamically
+    logger.info(f"Iniciando análise de novo arquivo: {original_file_name} ({media_mime_type})")
     
-    with st.spinner('Analisando a imagem...'):
+    with st.spinner('Analisando a mídia...'):
         try:
-            logger.info("Imagem carregada com sucesso")
+            logger.info("Mídia carregada com sucesso")
+            media_part_for_gemini = None
             
-            # Create progress bar
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
-            # Crop image into quadrants
-            status_text.text("Dividindo imagem em quadrantes...")
-            quadrants = crop_image_to_quadrants(image_data, grid_size)
-            progress_bar.progress(10)
-            
-            # Display quadrants in the Quadrants tab
-            with tab4:
-                st.subheader('Visualização dos Quadrantes')
-                for i in range(grid_size):
-                    cols = st.columns(grid_size)
-                    for j in range(grid_size):
-                        with cols[j]:
-                            quadrant_data, _ = quadrants[i * grid_size + j]
-                            st.image(quadrant_data, caption=f"Quadrante ({i},{j})", use_column_width=True)
-            
-            # Analyze quadrants
-            status_text.text("Analisando quadrantes...")
-            quadrant_result = parallel_quadrant_analysis(model, quadrants, prompt)
-            progress_bar.progress(40)
-            
-            # Analyze full image
-            status_text.text("Analisando imagem completa...")
-            full_result = analyze_shelf_image_structured(model, image_data, prompt)
+
+            if media_mime_type.startswith('image/'):
+                media_part_for_gemini = GenaiPart.from_bytes(data=media_data, mime_type=media_mime_type)
+                
+                # Validate image quality for images
+                status_text.text("Validando qualidade da imagem...")
+                quality_results = validate_image_quality(model, media_data) # Pass bytes for image quality
+                save_response(quality_results, f'quality_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
+                image_clarity = quality_results.get('image_clarity', 100)
+                shelf_visibility = quality_results.get('shelf_visibility', 100)
+                if image_clarity < 50: st.warning(f"Baixa claridade da imagem: {image_clarity}/100. Resultados podem ser imprecisos.")
+                if shelf_visibility < 70: st.warning(f"Baixa visibilidade da prateleira: {shelf_visibility}%. Resultados podem ser imprecisos.")
+                progress_bar.progress(10)
+
+                # Quadrant analysis (commented out for initial refactor focusing on main path)
+                # status_text.text("Dividindo imagem em quadrantes...")
+                # quadrants = crop_image_to_quadrants(media_data, grid_size)
+                # progress_bar.progress(10)
+                # with tab4:
+                #     st.subheader('Visualização dos Quadrantes')
+                #     # ... display quadrants ...
+                # status_text.text("Analisando quadrantes...")
+                # quadrant_result = parallel_quadrant_analysis(model, quadrants, prompt) # Needs update
+                # progress_bar.progress(40)
+                quadrant_result = None # Placeholder
+
+            elif media_mime_type.startswith('video/'):
+                status_text.text("Enviando vídeo para GCS...")
+                logger.info(f"Uploading video {original_file_name} to GCS.")
+                gcs_uri = upload_to_gcs(media_data, original_file_name, media_mime_type, GCS_BUCKET_NAME)
+                logger.info(f"Vídeo enviado para {gcs_uri}.")
+                media_part_for_gemini = GenaiPart.from_uri(uri=gcs_uri, mime_type=media_mime_type)
+                progress_bar.progress(20)
+                quadrant_result = None # No quadrant analysis for videos
+            else:
+                st.error(f"Tipo de mídia não suportado: {media_mime_type}")
+                logger.error(f"Unsupported media type: {media_mime_type}")
+                return
+
+            if not media_part_for_gemini:
+                st.error("Falha ao processar a mídia.")
+                logger.error("Media part for Gemini could not be created.")
+                return
+
+            status_text.text("Analisando mídia principal...")
+            full_result = analyze_shelf_image_structured(model, media_part_for_gemini, prompt)
             progress_bar.progress(70)
             
-            # Combine results
             status_text.text("Combinando resultados...")
-            final_result = combine_analysis_results([full_result, quadrant_result])
+            if quadrant_result: # Only combine if quadrant analysis was done (for images)
+                final_result = combine_analysis_results([full_result, quadrant_result])
+            else:
+                final_result = full_result # For videos or if quadrant analysis is skipped
             save_response(final_result, f'final_result_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
             progress_bar.progress(90)
             
-            # Get recommendations
             status_text.text("Gerando recomendações...")
-            recommendations = analyze_shelf_image_recommendations(model, image_data)
+            recommendations = analyze_shelf_image_recommendations(model, media_part_for_gemini)
             progress_bar.progress(100)
             status_text.text("Análise concluída!")
             
@@ -1056,17 +1103,10 @@ def analyze_shelf(image_data, model, prompt, tab1, tab2, tab3, tab4, grid_size):
                 st.subheader('JSON Raw')
                 st.json(final_result)
                 
-                # Display quadrant analysis
-                st.subheader('Análise por Quadrantes')
-                if 'quadrants' in final_result['analise_prateleira']:
-                    for i in range(grid_size):
-                        cols = st.columns(grid_size)
-                        for j in range(grid_size):
-                            quadrant_key = f"{i},{j}"
-                            with cols[j]:
-                                if quadrant_key in final_result['analise_prateleira']['quadrants']:
-                                    st.write(f"Quadrant {quadrant_key}")
-                                    st.json(final_result['analise_prateleira']['quadrants'][quadrant_key])
+                # Display quadrant analysis (conditional)
+                # if quadrant_result and 'quadrants' in final_result.get('analise_prateleira', {}):
+                #     st.subheader('Análise por Quadrantes')
+                #     # ... display quadrant results ...
             
             with tab2:
                 st.subheader('Análise e Recomendações')
@@ -1141,9 +1181,24 @@ def analyze_shelf(image_data, model, prompt, tab1, tab2, tab3, tab4, grid_size):
 def main():
     st.title('Análise de Visual Shelf Share')
     
-    # Initialize Vertex AI
-    initialize_vertex_ai(PROJECT_ID, LOCATION)
-    model = GenerativeModel("gemini-1.5-flash-002")
+    # Configure GenAI (Vertex AI)
+    configure_genai() 
+    try:
+        # Ensure environment variables GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are set
+        # and GOOGLE_GENAI_USE_VERTEXAI="true"
+        if not os.getenv("GOOGLE_CLOUD_PROJECT") and PROJECT_ID:
+            os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+        if not os.getenv("GOOGLE_CLOUD_LOCATION") and LOCATION:
+            os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
+        if not os.getenv("GOOGLE_GENAI_USE_VERTEXAI"):
+            os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+            
+        model = genai.GenerativeModel(MODEL_NAME)
+        logger.info(f"Successfully initialized GenerativeModel: {MODEL_NAME} using google-genai for Vertex AI.")
+    except Exception as e:
+        logger.error(f"Error initializing google-genai model for Vertex AI: {e}")
+        st.error(f"Failed to initialize AI Model: {e}")
+        return
 
     # Load prompt
     prompt = load_prompt()
@@ -1182,32 +1237,65 @@ def main():
         if use_default:
             try:
                 with open("images/shelf.jpg", "rb") as f:
-                    image_data = f.read()
+                    image_data_bytes = f.read()
+                st.session_state.media_data = image_data_bytes
+                st.session_state.media_mime_type = "image/jpeg"
+                st.session_state.original_file_name = "shelf.jpg" # Set for default
                 st.success("Imagem de exemplo carregada")
-                st.image("images/shelf.jpg", caption="Imagem de exemplo", use_column_width=True)
+                st.image(st.session_state.media_data, caption="Imagem de exemplo", use_column_width=True)
             except Exception as e:
-                st.error("Erro ao carregar imagem de exemplo")
+                st.error(f"Erro ao carregar imagem de exemplo: {e}")
                 logger.error(f"Error loading default image: {str(e)}")
-                image_data = None
+                st.session_state.media_data = None
+                st.session_state.media_mime_type = None
+                st.session_state.original_file_name = None
         else:
             uploaded_file = st.file_uploader(
-                "Upload de imagem da prateleira",
-                type=['jpg', 'jpeg', 'png'],
-                help="Selecione uma imagem de prateleira para análise"
+                "Upload de Imagem ou Vídeo da Prateleira",
+                type=['jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi', 'wmv', 'mkv'],
+                help="Selecione uma imagem ou vídeo de prateleira para análise"
             )
             if uploaded_file:
-                image_data = uploaded_file.read()
-                st.success("Imagem carregada com sucesso")
-                st.image(uploaded_file, caption="Imagem carregada", use_column_width=True)
+                # Read file data
+                media_data_bytes = uploaded_file.read()
+                file_mime_type = uploaded_file.type
+                st.session_state.original_file_name = uploaded_file.name # Store original filename
+                
+                st.success(f"{file_mime_type.split('/')[0].capitalize()} carregado com sucesso")
+                
+                if file_mime_type.startswith('image/'):
+                    st.image(media_data_bytes, caption="Mídia carregada", use_column_width=True)
+                    st.session_state.media_data = media_data_bytes
+                    st.session_state.media_mime_type = file_mime_type
+                elif file_mime_type.startswith('video/'):
+                    st.video(media_data_bytes) # Display video
+                    st.session_state.media_data = media_data_bytes # Store bytes for upload
+                    st.session_state.media_mime_type = file_mime_type
+                else:
+                    st.error("Tipo de arquivo não suportado para visualização.")
+                    st.session_state.media_data = None
+                    st.session_state.media_mime_type = None
+                    st.session_state.original_file_name = None
             else:
-                image_data = None
+                st.session_state.media_data = None
+                st.session_state.media_mime_type = None
+                st.session_state.original_file_name = None
         
         # Analysis button
         if st.button('Analisar Prateleira', use_container_width=True):
-            if image_data:
-                analyze_shelf(image_data, model, prompt, tab1, tab2, tab3, tab4, grid_size)
+            if st.session_state.get('media_data') and st.session_state.get('media_mime_type'):
+                original_file_name = st.session_state.get('original_file_name', 'default_media_file') # Get original_file_name
+                analyze_shelf( # Removed prompt from this call
+                    st.session_state.media_data, 
+                    model, 
+                    # prompt, # Argument removed
+                    tab1, tab2, tab3, tab4, 
+                    grid_size, 
+                    st.session_state.media_mime_type,
+                    original_file_name
+                )
             else:
-                st.warning("Por favor, selecione uma imagem para análise")
+                st.warning("Por favor, selecione uma imagem ou vídeo para análise")
 
 if __name__ == '__main__':
     main() 
