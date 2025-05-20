@@ -1046,9 +1046,11 @@ def analyze_shelf(media_data, model, tab1, tab2, tab3, tab4, grid_size, media_mi
                 quality_results = validate_image_quality(model, media_data) # Pass bytes for image quality
                 save_response(quality_results, f'quality_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
                 image_clarity = quality_results.get('image_clarity', 100)
-                shelf_visibility = quality_results.get('shelf_visibility', 100)
-                if image_clarity < 50: st.warning(f"Baixa claridade da imagem: {image_clarity}/100. Resultados podem ser imprecisos.")
-                if shelf_visibility < 70: st.warning(f"Baixa visibilidade da prateleira: {shelf_visibility}%. Resultados podem ser imprecisos.")
+                shelf_visibility = quality_results.get('shelf_visibility', 100) # Ensuring this line is correctly indented
+                if image_clarity < 50: 
+                    st.warning(f"Baixa claridade da imagem: {image_clarity}/100. Resultados podem ser imprecisos.")
+                if shelf_visibility < 70: 
+                    st.warning(f"Baixa visibilidade da prateleira: {shelf_visibility}%. Resultados podem ser imprecisos.")
                 progress_bar.progress(10)
 
                 # Quadrant analysis (commented out for initial refactor focusing on main path)
@@ -1114,10 +1116,11 @@ def analyze_shelf(media_data, model, tab1, tab2, tab3, tab4, grid_size, media_mi
             
             with tab1:
                 st.subheader('Análise Visual')
-                try:
-                    logger.info("Gerando visualizações")
-                    (fig_shelf_share, fig_product_count, fig_pie, fig_donut, 
-                     fig_treemap, fig_scatter, fig_radar, fig_funnel, fig_heatmap,
+                if media_mime_type.startswith('image/'):
+                    try:
+                        logger.info("Gerando visualizações para imagem.")
+                        (fig_shelf_share, fig_product_count, fig_pie, fig_donut, 
+                         fig_treemap, fig_scatter, fig_radar, fig_funnel, fig_heatmap,
                      df, count_column, shelf_share_column) = create_visualizations(final_result)
                     
                     # Create metric cards at the top
@@ -1167,14 +1170,20 @@ def analyze_shelf(media_data, model, tab1, tab2, tab3, tab4, grid_size, media_mi
                                 df.style.background_gradient(subset=['visual_shelf_share'], cmap='YlOrRd'),
                                 use_container_width=True
                             )
-                    
-                except Exception as e:
-                    error_msg = f'Erro ao criar visualizações: {str(e)}'
-                    logger.error(error_msg)
-                    st.error(error_msg)
+                        
+                    except Exception as e:
+                        error_msg = f'Erro ao criar visualizações para imagem: {str(e)}'
+                        logger.error(error_msg)
+                        st.error(error_msg)
+                elif media_mime_type.startswith('video/'):
+                    logger.info("Exibindo JSON para análise de vídeo em 'Análise Visual'.")
+                    st.info("Visualizações detalhadas para análise de vídeo ainda não implementadas. Exibindo JSON da análise abaixo.")
+                    st.json(final_result) # Display the raw JSON for video in tab1 as well
+                else:
+                    st.warning(f"Tipo de mídia não suportado para visualização em 'Análise Visual': {media_mime_type}")
                     
         except Exception as e:
-            error_msg = f'Erro ao processar a imagem: {str(e)}'
+            error_msg = f'Erro ao processar a mídia: {str(e)}' # Updated error message
             logger.error(error_msg)
             st.error(error_msg)
 
